@@ -3,6 +3,7 @@ package cmd
 import (
 	"context"
 	"fmt"
+	"os"
 	"time"
 
 	"github.com/cappuch/cuardach/src/config"
@@ -26,14 +27,16 @@ var proxyTestCmd = &cobra.Command{
 	Short: "Fetch and validate public proxies",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		pool := privacy.NewProxyPool()
+		pool.ClearCache()
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 		defer cancel()
 
 		fmt.Println("  fetching proxy lists...")
-		n, err := pool.Load(ctx, func(tested, working int) {
-			fmt.Printf("\r  tested: %d  working: %d", tested, working)
+		start := time.Now()
+		n, err := pool.Load(ctx, func(info privacy.ProgressInfo) {
+			printProgress(info, start)
 		})
-		fmt.Println()
+		fmt.Fprintln(os.Stderr)
 
 		if err != nil {
 			return err
@@ -60,7 +63,39 @@ var proxyListCmd = &cobra.Command{
 	},
 }
 
-// loadProxyPool fetches and validates proxies if rotation is enabled.
+func printProgress(info privacy.ProgressInfo, start time.Time) {
+	pct := 0
+	if info.Total > 0 {
+		pct = info.Tested * 100 / info.Total
+	}
+
+	filled := pct * 30 / 100
+	bar := make([]byte, 30)
+	for i := range bar {
+		if i < filled {
+			bar[i] = '#'
+		} else {
+			bar[i] = '-'
+		}
+	}
+
+	eta := ""
+	elapsed := time.Since(start)
+	if info.Tested > 0 && info.Tested < info.Total {
+		rate := elapsed / time.Duration(info.Tested)
+		remaining := rate * time.Duration(info.Total-info.Tested)
+		secs := int(remaining.Seconds())
+		if secs > 0 {
+			eta = fmt.Sprintf(" eta %ds", secs)
+		} else {
+			eta = " eta <1s"
+		}
+	}
+
+	fmt.Fprintf(os.Stderr, "\r  [%s] %3d%%  %d/%d  %d ok%s  ",
+		string(bar), pct, info.Tested, info.Total, info.Working, eta)
+}
+
 func loadProxyPool(cfg *config.Config) *privacy.ProxyPool {
 	if !cfg.Privacy.Proxy.Rotate {
 		return nil
@@ -70,27 +105,25 @@ func loadProxyPool(cfg *config.Config) *privacy.ProxyPool {
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
 
+	start := time.Now()
 	fresh := false
-	n, err := pool.Load(ctx, func(tested, working int) {
-		if !fresh {
-			fresh = true
-			fmt.Print("  fetching proxies...")
-		}
-		fmt.Printf("\r  validating proxies... tested %d, %d working", tested, working)
+	n, err := pool.Load(ctx, func(info privacy.ProgressInfo) {
+		fresh = true
+		printProgress(info, start)
 	})
 	if fresh {
-		fmt.Println()
+		fmt.Fprintln(os.Stderr)
 	}
 
 	if err != nil || n == 0 {
-		fmt.Println("  warning: no working proxies found, using direct connection")
+		fmt.Fprintln(os.Stderr, "  warning: no working proxies found, using direct connection")
 		return nil
 	}
 
 	if fresh {
-		fmt.Printf("  %d proxies validated and cached\n", n)
+		fmt.Fprintf(os.Stderr, "  %d proxies validated and cached\n", n)
 	} else {
-		fmt.Printf("  %d proxies loaded from cache\n", n)
+		fmt.Fprintf(os.Stderr, "  %d proxies loaded from cache\n", n)
 	}
 	return pool
 }

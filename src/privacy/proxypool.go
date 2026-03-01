@@ -60,21 +60,29 @@ func NewProxyPool() *ProxyPool {
 	return &ProxyPool{
 		sources:   defaultProxySources,
 		testURL:   "http://httpbin.org/ip",
-		timeout:   5 * time.Second,
+		timeout:   3 * time.Second,
 		minCount:  3,
 		cachePath: filepath.Join(home, ".cache", "cuardach", "proxies.json"),
 		cacheTTL:  1 * time.Hour,
 	}
 }
 
-func (p *ProxyPool) Load(ctx context.Context, onProgress func(tested, working int)) (int, error) {
+// ProgressInfo is passed to the progress callback during validation.
+type ProgressInfo struct {
+	Tested  int
+	Working int
+	Total   int
+}
+
+// Load tries on-disk cache first. If stale, fetches fresh and validates.
+func (p *ProxyPool) Load(ctx context.Context, onProgress func(ProgressInfo)) (int, error) {
 	if n, ok := p.loadCache(); ok {
 		return n, nil
 	}
 	return p.loadFresh(ctx, onProgress)
 }
 
-func (p *ProxyPool) loadFresh(ctx context.Context, onProgress func(tested, working int)) (int, error) {
+func (p *ProxyPool) loadFresh(ctx context.Context, onProgress func(ProgressInfo)) (int, error) {
 	raw := p.fetchAll(ctx)
 	if len(raw) == 0 {
 		return 0, fmt.Errorf("no proxies fetched from any source")
@@ -85,12 +93,14 @@ func (p *ProxyPool) loadFresh(ctx context.Context, onProgress func(tested, worki
 		raw = raw[:500]
 	}
 
+	total := len(raw)
+
 	type result struct {
 		proxy Proxy
 		ok    bool
 	}
-	ch := make(chan result, len(raw))
-	sem := make(chan struct{}, 100)
+	ch := make(chan result, total)
+	sem := make(chan struct{}, 300)
 
 	var wg sync.WaitGroup
 	tested := 0
@@ -111,11 +121,11 @@ func (p *ProxyPool) loadFresh(ctx context.Context, onProgress func(tested, worki
 			if ok {
 				working++
 			}
-			t, w := tested, working
+			info := ProgressInfo{Tested: tested, Working: working, Total: total}
 			mu.Unlock()
 
 			if onProgress != nil {
-				onProgress(t, w)
+				onProgress(info)
 			}
 
 			ch <- result{proxy: proxy, ok: ok}
@@ -186,6 +196,11 @@ func (p *ProxyPool) loadCache() (int, bool) {
 	p.mu.Unlock()
 
 	return len(proxies), true
+}
+
+// ClearCache removes the on-disk proxy cache.
+func (p *ProxyPool) ClearCache() {
+	os.Remove(p.cachePath)
 }
 
 func (p *ProxyPool) saveCache(proxies []Proxy) {
