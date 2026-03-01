@@ -63,22 +63,30 @@ var proxyListCmd = &cobra.Command{
 	},
 }
 
+// braille spinner frames
+var spinFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
+
 func printProgress(info privacy.ProgressInfo, start time.Time) {
 	pct := 0
 	if info.Total > 0 {
 		pct = info.Tested * 100 / info.Total
 	}
 
-	filled := pct * 30 / 100
-	bar := make([]byte, 30)
+	// bar with [===>    ] style, 40 chars wide
+	width := 40
+	filled := pct * width / 100
+	bar := make([]byte, width)
 	for i := range bar {
 		if i < filled {
-			bar[i] = '#'
+			bar[i] = '='
+		} else if i == filled {
+			bar[i] = '>'
 		} else {
-			bar[i] = '-'
+			bar[i] = ' '
 		}
 	}
 
+	// ETA
 	eta := ""
 	elapsed := time.Since(start)
 	if info.Tested > 0 && info.Tested < info.Total {
@@ -86,14 +94,22 @@ func printProgress(info privacy.ProgressInfo, start time.Time) {
 		remaining := rate * time.Duration(info.Total-info.Tested)
 		secs := int(remaining.Seconds())
 		if secs > 0 {
-			eta = fmt.Sprintf(" eta %ds", secs)
+			eta = fmt.Sprintf("eta %ds", secs)
 		} else {
-			eta = " eta <1s"
+			eta = "eta <1s"
 		}
+	} else if info.Tested >= info.Total {
+		eta = "done"
 	}
 
-	fmt.Fprintf(os.Stderr, "\r  [%s] %3d%%  %d/%d  %d ok%s  ",
-		string(bar), pct, info.Tested, info.Total, info.Working, eta)
+	// braille spinner — time-based so it spins at constant speed
+	spin := spinFrames[int(time.Since(start).Milliseconds()/80)%len(spinFrames)]
+
+	// chunky percentage using block chars
+	pctStr := fmt.Sprintf("%d%%", pct)
+
+	fmt.Fprintf(os.Stderr, "\r  %s [%s] %3s  %d/%d  %d ok  %s  ",
+		spin, string(bar), pctStr, info.Tested, info.Total, info.Working, eta)
 }
 
 func loadProxyPool(cfg *config.Config) *privacy.ProxyPool {
