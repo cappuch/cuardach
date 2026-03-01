@@ -45,6 +45,7 @@ func (idx *SQLiteIndexer) Init(ctx context.Context) error {
 		var version int
 		err := idx.db.QueryRowContext(ctx, "SELECT COALESCE(MAX(version), 0) FROM schema_version").Scan(&version)
 		if err == nil && version >= schemaVersion {
+			idx.AutoPurge(ctx)
 			return nil
 		}
 	}
@@ -59,7 +60,39 @@ func (idx *SQLiteIndexer) Init(ctx context.Context) error {
 		return fmt.Errorf("recording schema version: %w", err)
 	}
 
+	idx.AutoPurge(ctx)
+
 	return nil
+}
+
+func (idx *SQLiteIndexer) AutoPurge(ctx context.Context) (purged, deduped int) {
+	res, err := idx.db.ExecContext(ctx,
+		`DELETE FROM search_results WHERE query IN (
+			SELECT query FROM cache_queries WHERE expires_at <= datetime('now')
+		)`)
+	if err == nil {
+		n, _ := res.RowsAffected()
+		purged += int(n)
+	}
+
+	idx.db.ExecContext(ctx, "DELETE FROM cache_queries WHERE expires_at <= datetime('now')")
+
+	idx.db.ExecContext(ctx, "DELETE FROM cache_content WHERE expires_at <= datetime('now')")
+
+	res, err = idx.db.ExecContext(ctx,
+		`DELETE FROM search_results WHERE id NOT IN (
+			SELECT MAX(id) FROM search_results GROUP BY url_hash, source
+		)`)
+	if err == nil {
+		n, _ := res.RowsAffected()
+		deduped += int(n)
+	}
+
+	idx.db.ExecContext(ctx, "INSERT INTO search_results_fts(search_results_fts) VALUES('rebuild')")
+
+	idx.db.ExecContext(ctx, "PRAGMA incremental_vacuum")
+
+	return purged, deduped
 }
 
 func (idx *SQLiteIndexer) Store(ctx context.Context, query string, results []engine.Result) error {
