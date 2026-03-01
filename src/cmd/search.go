@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/cappuch/cuardach/src/aggregator"
+	"github.com/cappuch/cuardach/src/bangs"
 	"github.com/cappuch/cuardach/src/cache"
 	"github.com/cappuch/cuardach/src/config"
 	"github.com/cappuch/cuardach/src/display"
@@ -35,6 +36,23 @@ var searchCmd = &cobra.Command{
 
 func runSearch(cmd *cobra.Command, args []string) error {
 	query := strings.Join(args, " ")
+
+	bang := bangs.Parse(query)
+	if bang.Bang != nil {
+		if engineName, ok := bangs.IsEngineBang(bang); ok {
+			query = bang.Query
+			cmd.Flags().Set("engines", engineName)
+		} else {
+			fmt.Fprintf(cmd.ErrOrStderr(), "  !%s -> %s\n", bang.Bang.Name, bang.Bang.Title)
+			fmt.Println(bang.Redirect)
+			return nil
+		}
+	}
+
+	if strings.TrimSpace(query) == "" {
+		return fmt.Errorf("empty query")
+	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 

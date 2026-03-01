@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/cappuch/cuardach/src/aggregator"
+	"github.com/cappuch/cuardach/src/bangs"
 	"github.com/cappuch/cuardach/src/cache"
 	"github.com/cappuch/cuardach/src/config"
 	"github.com/cappuch/cuardach/src/engine"
@@ -51,10 +52,30 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 	}
 
 	q := r.URL.Query().Get("q")
+
+	if q != "" {
+		bang := bangs.Parse(q)
+		if bang.Bang != nil {
+			if engineName, ok := bangs.IsEngineBang(bang); ok {
+				q = bang.Query
+				_ = engineName // used below
+				if q == "" {
+					q = r.URL.Query().Get("q") // fallback
+				}
+				engineOverride := engineName
+				s.handleSearchWithEngine(w, r, q, engineOverride)
+				return
+			}
+			// Redirect bang — send the user to the external site
+			http.Redirect(w, r, bang.Redirect, http.StatusFound)
+			return
+		}
+	}
+
 	var b strings.Builder
 
 	b.WriteString(`<form action="/" method="get">`)
-	b.WriteString(`<input type="text" name="q" placeholder="search..." value="` + html.EscapeString(q) + `" autofocus> `)
+	b.WriteString(`<input type="text" name="q" placeholder="search... (try !w, !gh, !yt)" value="` + html.EscapeString(q) + `" autofocus> `)
 	b.WriteString(`<input type="submit" value="search">`)
 	b.WriteString(`</form>`)
 
@@ -113,6 +134,52 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 		b.WriteString(`<p class="warn">` + html.EscapeString(e.Error()) + `</p>`)
 	}
 
+	s.page(w, b.String())
+}
+
+func (s *Server) handleSearchWithEngine(w http.ResponseWriter, r *http.Request, q, engineName string) {
+	var b strings.Builder
+	b.WriteString(`<form action="/" method="get">`)
+	b.WriteString(`<input type="text" name="q" placeholder="search..." value="` + html.EscapeString("!"+engineName+" "+q) + `" autofocus> `)
+	b.WriteString(`<input type="submit" value="search">`)
+	b.WriteString(`</form>`)
+
+	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+	defer cancel()
+
+	engines := s.registry.Enabled([]string{engineName})
+	if len(engines) == 0 {
+		b.WriteString(`<p class="warn">engine "` + html.EscapeString(engineName) + `" not available</p>`)
+		s.page(w, b.String())
+		return
+	}
+
+	b.WriteString(`<p>searching ` + html.EscapeString(engineName) + ` only</p>`)
+
+	agg := aggregator.New(engines)
+	results, errs := agg.Search(ctx, engine.SearchParams{
+		Query:      q,
+		MaxResults: s.cfg.Display.MaxResults,
+	})
+
+	if len(results) > 0 {
+		plain := make([]engine.Result, len(results))
+		var sources []string
+		for i, res := range results {
+			plain[i] = res.Result
+			sources = append(sources, res.Sources...)
+		}
+		s.cache.PutResults(ctx, q, plain, sources, s.cfg.Cache.ResultTTL.Duration)
+	}
+
+	b.WriteString(fmt.Sprintf(`<p>%d results</p>`, len(results)))
+	for i, res := range results {
+		src := strings.Join(res.Sources, ", ")
+		writeResult(&b, i+1, res.Title, res.URL, res.Snippet, src, res.Domain)
+	}
+	for _, e := range errs {
+		b.WriteString(`<p class="warn">` + html.EscapeString(e.Error()) + `</p>`)
+	}
 	s.page(w, b.String())
 }
 
